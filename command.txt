@@ -1,0 +1,38 @@
+------------------------------------------------------------------------------- abc -------------------------------------------------------------------------
+sudo mkdir -p /var/www/abc
+43.205.208.59
+
+ssh -i "ABC.pem" ubuntu@ec2-xx-xx-xx-xx.ap-south-1.compute.amazonaws.com
+scp -i "~/home/magictap/Videos/Jigsaw-puzzle/ABC.pem" -r frontend/dist ubuntu@ec2-xx-xx-xx-xx.ap-south-1.compute.amazonaws.com:/home/ubuntu/abc/
+
+sudo rm -rf /var/www/abc/*
+sudo cp -r ~/abc/dist/* /var/www/abc/
+sudo chown -R www-data:www-data /var/www/abc
+sudo chmod -R 755 /var/www/abc
+
+sudo systemctl daemon-reload
+sudo systemctl restart nginx
+sudo systemctl reload nginx
+
+docker build -t magictap-sandbox-abc-backend:1.0.0 . 
+docker tag magictap-sandbox-abc-backend:1.0.0 ABC/magictap-sandbox:abc-backend-1.0.0
+
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ABC
+docker push ABC/magictap-sandbox:abc-backend-1.0.0
+
+sudo aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ABC
+docker pull ABC/magictap-sandbox:abc-backend-1.0.0
+
+Tech@magictap.in
+sudo ln -s /etc/nginx/sites-available/abc /etc/nginx/sites-enabled/
+
+sudo certbot --nginx -d abc.magictap.global
+
+docker compose stop abc-backend 
+docker compose up -d --no-deps abc-backend
+docker exec abc-backend node seedAdmin.js
+
+---------------------------------- data fetch ------------------------------------
+mkdir -p /home/magictap/Desktop/Events_data/abc-data
+
+aws s3 sync s3://magictap-sandbox-bucket/drills-videos/ /home/magictap/Desktop/Events_data/abc-data/ --region ap-south-1

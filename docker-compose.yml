@@ -1,0 +1,55 @@
+services:
+
+  mongodb:
+    image: ${MONGODB_IMAGE:-mongo:latest}
+    container_name: ${MONGODB_CONTAINER_NAME:-magictap-mongodb}
+    restart: always
+    expose:
+      - ${MONGODB_PORT}
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME:-root}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD:-example}
+    volumes:
+      - ${MONGODB_DATA_VOLUME:-mongo-data}:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "1"
+    networks:
+      - magictap-network
+
+  backend:
+    image: ${INDIA_KOREA_MATCH_CARD_BACKEND_IMAGE:-magictap-backend:latest}
+    container_name: ${INDIA_KOREA_MATCH_CARD_CONTAINER_NAME:-magictap-backend}
+    restart: always
+    ports:
+      - "127.0.0.1:${INDIA_KOREA_MATCH_CARD_BACKEND_PORT:-5001}:${INDIA_KOREA_MATCH_CARD_BACKEND_HTTP_PORT:-5001}"
+    env_file:
+      - .env
+    environment:
+      - MONGO_DATABASE_URL=${MONGO_DATABASE_URL:-mongodb://magictap-mongodb:27017/magictap-db}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${INDIA_KOREA_MATCH_CARD_BACKEND_HTTP_PORT:-5001}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - magictap-network
+
+volumes:
+  mongo-data:
+
+networks:
+  magictap-network:
+    driver: bridge
