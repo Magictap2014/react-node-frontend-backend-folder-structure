@@ -1,0 +1,76 @@
+--------------------------------------------------- Install ----------------------------------------------
+sudo apt update && sudo apt install -y squid
+squid -v
+
+--------------------------------------------------- Where each file goes ----------------------------------------------
+sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.bak
+sudo mkdir -p /etc/squid/projects /etc/squid/domains
+
+# Common (shared rules + default port 3128 — includes /etc/squid/projects/*.conf)
+sudo cp deploy/squid/squid.conf                   /etc/squid/squid.conf
+sudo cp deploy/squid/default-domains.txt          /etc/squid/domains/default.txt
+
+# Per project (born-struggler → port 3129): port + http_access + error log / domain allowlist
+sudo cp deploy/squid/born-struggler.conf          /etc/squid/projects/born-struggler.conf
+sudo cp deploy/squid/born-struggler-domains.txt   /etc/squid/domains/born-struggler.txt
+
+# i-am-attending → port 3130
+sudo cp deploy/cgc-registration/squid/common-backend/app-specific/cgc-registration-poster.conf   /etc/squid/projects/cgc-registration-poster.conf
+sudo cp deploy/cgc-registration/squid/common-backend/app-specific/cgc-registration-poster-domain.txt  /etc/squid/domains/cgc-registration-poster.txt
+
+# Add a project: copy born-struggler.conf → <project>.conf, change port (next free: 3131…), name=, acl names, domains file, log file
+
+--------------------------------------------------- Test & reload ----------------------------------------------
+sudo squid -k parse                               # must show no "ERROR: Can not open file"
+sudo systemctl restart squid                      # needed when a project/port is added — let it finish, don't Ctrl+C
+sudo ss -ltnp | grep squid                        # expect 3128 and 3129
+sudo systemctl enable squid
+sudo systemctl status squid
+
+# After editing a domains/*.txt allowlist only (no restart needed)
+sudo squid -k parse && sudo squid -k reconfigure
+
+--------------------------------------------------- Firewall ----------------------------------------------
+# Project ports must NOT be public — also make sure they're not open in the AWS security group
+sudo ss -ltnp | grep squid
+
+# Docker network subnet must fall inside localnet (172.16.0.0/12) in squid.conf — if it's 192.168.x, add it there too
+docker network inspect magictap-network -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+
+# ufw: first match wins — add the allow BEFORE the deny (3128 default, 3129 born-struggler)
+# Don't use `ufw insert 1` — it fails with "Invalid position" when the rule list is empty
+sudo ufw delete deny 3128:3130/tcp
+sudo ufw allow from 172.16.0.0/12 to any port 3128:3130 proto tcp
+sudo ufw deny 3128:3130/tcp
+sudo ufw status numbered | grep 312               # allow must be listed above deny
+
+--------------------------------------------------- Backend (born-struggler .portfolioenv) ----------------------------------------------
+HTTP_PROXY=http://host.docker.internal:3129
+HTTPS_PROXY=http://host.docker.internal:3129
+NO_PROXY=localhost,127.0.0.1,host.docker.internal,magictap-postgres,magictap-redis
+
+--------------------------------------------------- Test ----------------------------------------------
+# Default port (3128) — host maintenance
+curl -x http://127.0.0.1:3128 -I https://pypi.org                  # 200 → allowed
+curl -x http://127.0.0.1:3128 -I https://api.telegram.org          # 403 → not in default list
+
+# born-struggler (3129)
+curl -x http://127.0.0.1:3129 -I https://api.telegram.org          # 200/302 → allowed
+curl -x http://127.0.0.1:3129 -I https://example.com               # 403 → blocked, shows up in born-struggler_error.log
+
+# From inside the backend container
+docker exec -it portfolio-backend curl -x http://host.docker.internal:3129 -I https://www.googleapis.com
+docker exec -it portfolio-backend env | grep -i proxy
+
+--------------------------------------------------- Logs ----------------------------------------------
+sudo tail -f /var/log/squid/born-struggler_error.log              # per project: blocked/failed requests only
+sudo tail -f /var/log/squid/default_error.log                     # default port 3128
+sudo grep TCP_DENIED /var/log/squid/born-struggler_error.log | tail -50   # domains to add to domains/born-struggler.txt
+sudo tail -f /var/log/squid/cache.log                             # squid itself (startup, config errors)
+sudo journalctl -u squid -f
+
+--------------------------------------------------- Manage ----------------------------------------------
+sudo systemctl stop squid
+sudo systemctl restart squid
+sudo squid -k rotate
+sudo squidclient -h 127.0.0.1 mgr:info

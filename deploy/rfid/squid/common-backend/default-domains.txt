@@ -1,0 +1,6 @@
+# Install: /etc/squid/domains/default.txt — shared default port 3128 (not tied to any project)
+
+# OS packages / pip (host maintenance through the proxy)
+.ubuntu.com
+pypi.org
+files.pythonhosted.org

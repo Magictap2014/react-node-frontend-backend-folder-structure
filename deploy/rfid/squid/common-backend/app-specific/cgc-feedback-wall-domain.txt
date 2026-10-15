@@ -1,0 +1,5 @@
+# Install: /etc/squid/domains/cgc-feedback-wall.txt — leading dot matches all subdomains
+
+# Own backend + S3
+.magictap.global
+.amazonaws.com

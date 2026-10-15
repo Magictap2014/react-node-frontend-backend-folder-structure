@@ -1,38 +1,85 @@
-------------------------------------------------------------------------------- abc -------------------------------------------------------------------------
-sudo mkdir -p /var/www/abc
-43.205.208.59
 
-ssh -i "ABC.pem" ubuntu@ec2-xx-xx-xx-xx.ap-south-1.compute.amazonaws.com
-scp -i "~/home/magictap/Videos/Jigsaw-puzzle/ABC.pem" -r frontend/dist ubuntu@ec2-xx-xx-xx-xx.ap-south-1.compute.amazonaws.com:/home/ubuntu/abc/
+https://cgc.magictap.co.in/feedback-wall/
+43.204.235.244
+ec2-34.204.235.244.ap-south-1.compute.amazonaws.com
 
-sudo rm -rf /var/www/abc/*
-sudo cp -r ~/abc/dist/* /var/www/abc/
-sudo chown -R www-data:www-data /var/www/abc
-sudo chmod -R 755 /var/www/abc
+chmod 400 "mosaic-wall.pem"
+
+############## frontend
+ssh magictap-sandbox-frontend-server
+
+scp -r dist magictap-sandbox-frontend-server:/home/ec2-user/powergrid-hollowtube/
+
+sudo mkdir -p /var/www/powergrid-hollowtube
+sudo rm -rf /var/www/powergrid-hollowtube/*
+sudo cp -r ~/powergrid-hollowtube/dist/* /var/www/powergrid-hollowtube/
+sudo chown -R nginx:nginx /var/www/powergrid-hollowtube
+sudo chmod -R 755 /var/www/powergrid-hollowtube
+ls /var/www/powergrid-hollowtube
 
 sudo systemctl daemon-reload
 sudo systemctl restart nginx
 sudo systemctl reload nginx
 
-docker build -t magictap-sandbox-abc-backend:1.0.0 . 
-docker tag magictap-sandbox-abc-backend:1.0.0 ABC/magictap-sandbox:abc-backend-1.0.0
-
-aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ABC
-docker push ABC/magictap-sandbox:abc-backend-1.0.0
-
-sudo aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin ABC
-docker pull ABC/magictap-sandbox:abc-backend-1.0.0
+sudo apt install certbot python3-certbot-nginx -y
+sudo nano /etc/redis/redis.conf
+sudo systemctl restart redis
+# For main website
+sudo certbot --nginx -d events.magictap.co.in
 
 Tech@magictap.in
-sudo ln -s /etc/nginx/sites-available/abc /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/powergrid-hollowtube /etc/nginx/sites-enabled/
 
-sudo certbot --nginx -d abc.magictap.global
 
-docker compose stop abc-backend 
-docker compose up -d --no-deps abc-backend
-docker exec abc-backend node seedAdmin.js
+docker build -t magictap-sandbox-event-powergrid-hollowtube-backend:1.0.5 . (wow)
 
----------------------------------- data fetch ------------------------------------
-mkdir -p /home/magictap/Desktop/Events_data/abc-data
+docker build -t magictap-sandbox-powergrid-hollowtube-backend-1.0.0 .
+docker tag magictap-sandbox-powergrid-hollowtube-backend-1.0.0 623116374689.dkr.ecr.ap-south-1.amazonaws.com/magictap-sandbox:powergrid-hollowtube-backend-1.0.0
 
-aws s3 sync s3://magictap-sandbox-bucket/drills-videos/ /home/magictap/Desktop/Events_data/abc-data/ --region ap-south-1
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 623116374689.dkr.ecr.ap-south-1.amazonaws.com
+docker push 623116374689.dkr.ecr.ap-south-1.amazonaws.com/magictap-sandbox:powergrid-hollowtube-backend-1.0.0
+
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 623116374689.dkr.ecr.ap-south-1.amazonaws.com
+docker pull 623116374689.dkr.ecr.ap-south-1.amazonaws.com/magictap-sandbox:powergrid-hollowtube-backend-1.0.0
+
+
+docker compose -f backend-docker-compose.yml stop powergrid-hollowtube
+docker compose --env-file .env.cgc-powergrid-hollowtube -f backend-docker-compose.yml pull powergrid-hollowtube
+docker compose --env-file .powergrid -f backend-docker-compose.yml up --no-deps -d powergrid-hollowtube
+
+
+--------------------------------------------------- Aurdino -------------------------------------------------------
+ls -la /dev/ttyUSB0
+# and check who owns it
+stat /dev/ttyUSB0
+id | grep dialout
+newgrp dialout
+
+
+ls -la /dev/ttyUSB0
+groups $USER
+sudo usermod -a -G dialout $USER
+
+# Check if Chrome can see the device
+google-chrome --enable-logging --v=1 2>&1 | grep -i serial &
+
+# Check udev rule for the device
+udevadm info -a -n /dev/ttyUSB0 | grep -E "idVendor|idProduct|manufacturer" | head -5
+
+# Get vendor/product ID
+lsusb | grep -i arduino
+# or
+lsusb | grep -i ch34
+
+sudo tee /etc/udev/rules.d/99-arduino.rules << 'EOF'
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", MODE="0666", GROUP="dialout"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+ls -la /dev/ttyUSB0
+
+sudo snap connect chromium:raw-usb
+sudo snap connect chromium:serial-port
+
+

@@ -1,0 +1,50 @@
+--------------------------------------------------- Where each file goes ----------------------------------------------
+# http-level (auto-included by /etc/nginx/nginx.conf → include /etc/nginx/conf.d/*.conf)
+sudo cp deploy/nginx/backend-upstreams.conf       /etc/nginx/conf.d/backend-upstreams.conf
+sudo cp deploy/nginx/gzip_security.conf           /etc/nginx/conf.d/gzip_security.conf
+
+# Snippets (included inside location blocks)
+sudo cp deploy/nginx/proxy-headers.conf           /etc/nginx/snippets/proxy-headers.conf
+sudo cp deploy/nginx/proxy-timeouts.conf          /etc/nginx/snippets/proxy-timeouts.conf
+
+# Log snippets (one per project + the server-level fallback)
+sudo cp deploy/nginx/sandbox-backend-logs.conf    /etc/nginx/snippets/sandbox-backend-logs.conf
+sudo cp deploy/nginx/born-straggler-logs.conf     /etc/nginx/snippets/born-straggler-logs.conf
+
+# Per-project location blocks (included inside the sandbox-backend server block)
+sudo mkdir -p /etc/nginx/backend-configs
+sudo cp deploy/nginx/born-straggler.conf          /etc/nginx/backend-configs/born-straggler.conf
+
+# Server blocks
+sudo cp "deploy/nginx/magictap-sandbox-backend .conf" /etc/nginx/sites-available/magictap-sandbox-backend.conf
+sudo ln -sf /etc/nginx/sites-available/magictap-sandbox-backend.conf /etc/nginx/sites-enabled/magictap-sandbox-backend.conf
+sudo cp deploy/nginx/frontend.conf                /etc/nginx/sites-available/frontend.conf
+sudo ln -sf /etc/nginx/sites-available/frontend.conf /etc/nginx/sites-enabled/frontend.conf
+
+--------------------------------------------------- Test & reload ----------------------------------------------
+sudo nginx -t
+sudo systemctl reload nginx
+sudo systemctl status nginx
+
+--------------------------------------------------- Debug ----------------------------------------------
+# Confirm nginx.conf actually includes conf.d + sites-enabled inside http {}
+grep -n "include" /etc/nginx/nginx.conf
+
+# Every place a zone/map/upstream is defined — each must appear exactly once
+sudo grep -rn "limit_req_zone\|map \$http_upgrade\|upstream born-struggler-backend" /etc/nginx/
+
+# What's actually enabled
+ls -la /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ /etc/nginx/backend-configs/
+
+# Full merged config nginx sees
+sudo nginx -T | less
+
+--------------------------------------------------- Verify ----------------------------------------------
+curl -I https://sandbox-backend.magictap.global/health
+curl -I https://sandbox-backend.magictap.global/bornstruggler/csrf-token
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGVzdA==" \
+  "https://sandbox-backend.magictap.global/bornstruggler/socket.io/?EIO=4&transport=websocket"      # expect 101 Switching Protocols
+
+--------------------------------------------------- Logs ----------------------------------------------
+sudo tail -f /var/log/nginx/born-straggler_error.log       # per project
+sudo tail -f /var/log/nginx/sandbox-backend_error.log      # unmatched requests / TLS errors
