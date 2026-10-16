@@ -1,29 +1,33 @@
 #!/bin/bash
-set -e
+set -Ee
 
 # ── Project Configuration ────────────────────────────────────────────
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 
-BACKEND_PORT=8000
-FRONTEND_PORT=5173
-FRONTEND_PATH="/powergrid-hollowtube/"
+BACKEND_PORT=5010
+FRONTEND_PORT=5177
+
+BACKEND_HEALTH_PATH="/iocl-cube/api/health"
+FRONTEND_PATH="/iocl-cube/kiosk"
 
 BACKEND_PID=""
 FRONTEND_PID=""
+CLEANING_UP=0
 
 # ── Automatically Detect Network IP ──────────────────────────────────
 get_network_ip() {
-    # Prefer the LAN IP selected by the default network route.
-    local IP
-    IP=$(ip -4 route get 1.1.1.1 2>/dev/null |
-        awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')
+    local IP=""
 
-    # Fall back to the first active, non-loopback IPv4 address.
-    if [ -z "$IP" ]; then
-        IP=$(ip -o -4 addr show up scope global |
-            awk 'NR==1 {split($4,a,"/"); print a[1]}')
+    if command -v ip >/dev/null 2>&1; then
+        IP=$(ip -4 route get 1.1.1.1 2>/dev/null |
+            awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')
+
+        if [ -z "$IP" ]; then
+            IP=$(ip -o -4 addr show up scope global 2>/dev/null |
+                awk 'NR==1 {split($4,a,"/"); print a[1]}')
+        fi
     fi
 
     echo "$IP"
@@ -31,57 +35,145 @@ get_network_ip() {
 
 # ── Cleanup ───────────────────────────────────────────────────────────
 cleanup() {
+    [ "$CLEANING_UP" -eq 1 ] && return
+    CLEANING_UP=1
+
+    trap - EXIT INT TERM
+
     echo ""
     echo "Stopping application..."
 
-    [ -z "$BACKEND_PID" ] || kill "$BACKEND_PID" 2>/dev/null || true
-    [ -z "$FRONTEND_PID" ] || kill "$FRONTEND_PID" 2>/dev/null || true
+    for PID in "$FRONTEND_PID" "$BACKEND_PID"; do
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            kill "$PID" 2>/dev/null || true
+        fi
+    done
+
+    # Give the processes a moment to exit gracefully.
+    sleep 1
+
+    for PID in "$FRONTEND_PID" "$BACKEND_PID"; do
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            kill -TERM "$PID" 2>/dev/null || true
+        fi
+    done
+
+    echo "Application stopped."
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# ── Kill Existing Processes ───────────────────────────────────────────
+# ── Validate Project Directories ──────────────────────────────────────
+if [ ! -d "$BACKEND_DIR" ]; then
+    echo "ERROR: Backend directory not found: $BACKEND_DIR"
+    exit 1
+fi
+
+if [ ! -d "$FRONTEND_DIR" ]; then
+    echo "ERROR: Frontend directory not found: $FRONTEND_DIR"
+    exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+    echo "ERROR: npm is not installed or not in PATH."
+    exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl is required."
+    exit 1
+fi
+
+# ── Release Existing Application Ports ────────────────────────────────
 for PORT in "$BACKEND_PORT" "$FRONTEND_PORT"; do
-    PID=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
+    if command -v lsof >/dev/null 2>&1; then
+        PIDS=$(lsof -ti "tcp:$PORT" 2>/dev/null || true)
 
-    if [ -n "$PID" ]; then
-        echo "$PID" | xargs -r kill -9 2>/dev/null || true
-        echo "Released port $PORT"
+        if [ -n "$PIDS" ]; then
+            echo "Releasing port $PORT..."
+
+            while IFS= read -r PID; do
+                [ -z "$PID" ] && continue
+                kill "$PID" 2>/dev/null || true
+            done <<< "$PIDS"
+
+            # Wait briefly for the port to be released.
+            for _ in $(seq 1 5); do
+                if ! lsof -ti "tcp:$PORT" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+
+            PIDS=$(lsof -ti "tcp:$PORT" 2>/dev/null || true)
+            if [ -n "$PIDS" ]; then
+                echo "ERROR: Port $PORT is still occupied."
+                echo "Stop the existing process and run this script again."
+                exit 1
+            fi
+        fi
+    else
+        echo "WARNING: lsof is unavailable; cannot automatically check port $PORT."
     fi
 done
 
-# ── Backend Dependencies ──────────────────────────────────────────────
-cd "$BACKEND_DIR"
+# ── Install Dependencies When Necessary ───────────────────────────────
+install_dependencies() {
+    local DIR="$1"
+    local NAME="$2"
 
-echo "Checking backend dependencies..."
+    echo "Checking $NAME dependencies..."
 
-if [ ! -d node_modules ] || \
-   [ ! -f node_modules/.pkg_hash ] || \
-   ! md5sum -c node_modules/.pkg_hash --status 2>/dev/null; then
+    if [ ! -d "$DIR/node_modules" ] ||
+       [ ! -f "$DIR/package-lock.json" ] ||
+       [ ! -f "$DIR/node_modules/.pkg_hash" ] ||
+       ! (cd "$DIR" && md5sum -c node_modules/.pkg_hash --status 2>/dev/null); then
 
-    npm install
-    md5sum package.json > node_modules/.pkg_hash
-fi
+        echo "Installing $NAME dependencies..."
 
-# ── Start Node.js Backend ──────────────────────────────────────────────
-echo "Starting backend..."
+        (
+            cd "$DIR"
+            npm install
+        )
 
-npm run dev -- --host 0.0.0.0 &
+        # Record package.json and package-lock.json so changes trigger reinstall.
+        (
+            cd "$DIR"
+            md5sum package.json package-lock.json > node_modules/.pkg_hash
+        )
+    fi
+}
+
+install_dependencies "$BACKEND_DIR" "backend"
+install_dependencies "$FRONTEND_DIR" "frontend"
+
+# ── Start Backend ─────────────────────────────────────────────────────
+echo ""
+echo "Starting backend on port $BACKEND_PORT..."
+
+(
+    cd "$BACKEND_DIR"
+    exec npm run dev -- --host 0.0.0.0
+) &
 BACKEND_PID=$!
 
-# ── Wait for Backend ──────────────────────────────────────────────────
-echo "Waiting for backend..."
+# ── Wait for Backend Health Check ─────────────────────────────────────
+echo "Waiting for backend health check..."
 
 BACKEND_READY=0
 
-for i in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1; then
+for _ in $(seq 1 60); do
+    if curl -fsS \
+        "http://127.0.0.1:${BACKEND_PORT}${BACKEND_HEALTH_PATH}" \
+        >/dev/null 2>&1; then
         BACKEND_READY=1
         break
     fi
 
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-        echo "ERROR: Backend stopped unexpectedly."
+        echo "ERROR: Backend process stopped unexpectedly."
         exit 1
     fi
 
@@ -90,43 +182,38 @@ done
 
 if [ "$BACKEND_READY" -ne 1 ]; then
     echo "ERROR: Backend did not become ready within 60 seconds."
+    echo "Check this URL:"
+    echo "http://127.0.0.1:${BACKEND_PORT}${BACKEND_HEALTH_PATH}"
     exit 1
 fi
 
 echo "Backend is ready."
 
-# ── Frontend Dependencies ──────────────────────────────────────────────
-cd "$FRONTEND_DIR"
+# ── Start Frontend ────────────────────────────────────────────────────
+echo ""
+echo "Starting Vite frontend on port $FRONTEND_PORT..."
 
-echo "Checking frontend dependencies..."
-
-if [ ! -d node_modules ] || \
-   [ ! -f node_modules/.pkg_hash ] || \
-   ! md5sum -c node_modules/.pkg_hash --status 2>/dev/null; then
-
-    npm install
-    md5sum package.json > node_modules/.pkg_hash
-fi
-
-# ── Start Frontend on All Interfaces ───────────────────────────────────
-echo "Starting Vite frontend on 0.0.0.0..."
-
-npm run dev -- --host 0.0.0.0 &
+(
+    cd "$FRONTEND_DIR"
+    exec npm run dev -- --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort
+) &
 FRONTEND_PID=$!
 
-# ── Wait for Frontend ──────────────────────────────────────────────────
+# ── Wait for Frontend ─────────────────────────────────────────────────
 echo "Waiting for frontend..."
 
 FRONTEND_READY=0
 
-for i in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}${FRONTEND_PATH}" >/dev/null 2>&1; then
+for _ in $(seq 1 60); do
+    if curl -fsS \
+        "http://127.0.0.1:${FRONTEND_PORT}${FRONTEND_PATH}" \
+        >/dev/null 2>&1; then
         FRONTEND_READY=1
         break
     fi
 
     if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-        echo "ERROR: Frontend stopped unexpectedly."
+        echo "ERROR: Frontend process stopped unexpectedly."
         exit 1
     fi
 
@@ -135,41 +222,46 @@ done
 
 if [ "$FRONTEND_READY" -ne 1 ]; then
     echo "ERROR: Frontend did not become ready within 60 seconds."
+    echo "Check the frontend port and route:"
+    echo "http://127.0.0.1:${FRONTEND_PORT}${FRONTEND_PATH}"
     exit 1
 fi
 
 echo "Frontend is ready."
 
-# ── Detect Network IP Automatically ───────────────────────────────────
-NETWORK_IP=$(get_network_ip)
+# ── Detect Network IP ─────────────────────────────────────────────────
+NETWORK_IP="$(get_network_ip)"
 
 if [ -z "$NETWORK_IP" ]; then
-    echo "ERROR: Unable to detect a network IP address."
-    exit 1
+    echo "WARNING: Unable to detect network IP automatically."
+    NETWORK_IP="127.0.0.1"
 fi
 
 KIOSK_URL="http://${NETWORK_IP}:${FRONTEND_PORT}${FRONTEND_PATH}"
 
-# ── Display Network URLs ───────────────────────────────────────────────
+# ── Display Application URLs ──────────────────────────────────────────
 echo ""
 echo "============================================================"
-echo " APPLICATION STARTED"
+echo " APPLICATION STARTED SUCCESSFULLY"
 echo "============================================================"
-echo "Detected Network IP: $NETWORK_IP"
+echo "Network IP: $NETWORK_IP"
 echo ""
 echo "Kiosk URL:  $KIOSK_URL"
 echo "Frontend:   http://${NETWORK_IP}:${FRONTEND_PORT}${FRONTEND_PATH}"
 echo "Backend:    http://${NETWORK_IP}:${BACKEND_PORT}"
+echo "Health:     http://${NETWORK_IP}:${BACKEND_PORT}${BACKEND_HEALTH_PATH}"
 echo ""
 echo "Available IPv4 network addresses:"
 
-ip -o -4 addr show up scope global |
-    awk '{split($4,a,"/"); print "http://" a[1] ":5173/powergrid-hollowtube/"}'
+if command -v ip >/dev/null 2>&1; then
+    ip -o -4 addr show up scope global 2>/dev/null |
+        awk '{split($4,a,"/"); print "http://" a[1] ":5177/iocl-cube/"}'
+fi
 
 echo "============================================================"
 echo ""
 
-# ── Open Browser Using Network IP ──────────────────────────────────────
+# ── Open Kiosk Browser ────────────────────────────────────────────────
 echo "Opening kiosk browser at $KIOSK_URL"
 
 if command -v chromium-browser >/dev/null 2>&1; then
@@ -185,8 +277,25 @@ elif command -v google-chrome >/dev/null 2>&1; then
         --no-first-run --start-fullscreen "$KIOSK_URL" || true
 
 else
-    xdg-open "$KIOSK_URL" || true
+    echo "WARNING: Chromium/Chrome not found."
+    echo "Open this URL manually: $KIOSK_URL"
 fi
 
-# ── Keep Services Running ──────────────────────────────────────────────
-wait "$BACKEND_PID" "$FRONTEND_PID"
+# ── Keep Both Services Running ────────────────────────────────────────
+echo "Backend and frontend are running."
+echo "Press Ctrl+C to stop both services."
+
+# Exit if either service exits; cleanup will stop the other.
+while true; do
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo "ERROR: Backend process exited."
+        exit 1
+    fi
+
+    if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+        echo "ERROR: Frontend process exited."
+        exit 1
+    fi
+
+    sleep 2
+done
